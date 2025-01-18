@@ -1,0 +1,7 @@
+fastapi
+starlette
+wakeonlan
+pydantic
+pyyaml
+uvicorn
+ping3
