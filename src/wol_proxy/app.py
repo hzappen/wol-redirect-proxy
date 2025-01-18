@@ -189,16 +189,11 @@ class WolRedirect(PlainRedirect):
         timeout_s = int(self.target.options.get("timeout_s"))
         target_url_str = str(target_url)
         host = str(urlparse(target_url_str).hostname)
-        logger.debug(f"Pinging '{host}' with timeout {timeout_s}s")
-        first_ping = ping3.ping(host, unit="ms", timeout=timeout_s)
-        if first_ping:
-            logger.info(f"'{host}' ping successful in {first_ping}ms")
-        else:
-            logger.info(f"Sending magic packet to {self.target.options['mac']}")
-            send_magic_packet(self.target.options["mac"])
-            logger.info(f"Waiting for '{host}' to come alive timeout={timeout_s}s")
-            last_ping = await ping_until(timeout_s)
-            logger.info(f"Host '{host}' woke up, rtt={last_ping}")
+        logger.info(f"Sending magic packet to {self.target.options['mac']}")
+        send_magic_packet(self.target.options["mac"])
+        logger.info(f"Waiting for '{host}' to come alive timeout={timeout_s}s")
+        last_ping = await ping_until(timeout_s)
+        logger.info(f"Host '{host}' woke up, rtt={last_ping}")
 
         return await super()._handler(request, target_url_str, path_in)
 
