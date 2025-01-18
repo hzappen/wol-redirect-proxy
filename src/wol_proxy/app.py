@@ -14,7 +14,7 @@ import yaml
 from fastapi import FastAPI
 from pydantic import BaseModel, validator, AnyHttpUrl
 from starlette.requests import Request
-from starlette.responses import RedirectResponse, Response, JSONResponse
+from starlette.responses import Response, JSONResponse
 from wakeonlan import send_magic_packet
 import httpx
 
@@ -110,7 +110,6 @@ class PlainRedirect(BaseHandler):
         self.description = f"{self.description}"
 
     async def _handler(self, request: Request, target_url: str, path_in=None):
-        import httpx
 
         target_url_str = str(target_url)
         if path_in:
