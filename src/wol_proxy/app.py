@@ -99,7 +99,6 @@ class BaseHandler:
 
 @Handlers.register("plain")
 class PlainRedirect(BaseHandler):
-
     summary = "PLAIN REDIRECT"
     description = "A simple redirect."
 
@@ -108,19 +107,26 @@ class PlainRedirect(BaseHandler):
         self.description = f"{self.description}"
 
     async def _handler(self, request: Request, target_url: str, path_in=None):
-        redirect_target = os.path.join(target_url, path_in or '')
+        # Convert AnyHttpUrl to string
+        target_url_str = str(target_url)
+        redirect_target = target_url_str
+        if path_in:
+            # Use urljoin instead of os.path.join for URLs
+            if not target_url_str.endswith('/'):
+                target_url_str += '/'
+            redirect_target = target_url_str + path_in
+
         logger.info(f"Redirecting {request.method} to '{redirect_target}'")
         return RedirectResponse(redirect_target)
 
 
 @Handlers.register("wol")
 class WolRedirect(PlainRedirect):
-
     summary = "Wake-on-LAN"
     description = """A simple WoL redirect. It tries to ping the target url before redirecting.
-If it's not responding, it sends a magic packet to the target machine 
-and then again waits for the host to become reachable.
-"""
+    If it's not responding, it sends a magic packet to the target machine 
+    and then again waits for the host to become reachable.
+    """
     required_keys = {"mac", "timeout_s"}
 
     def __init__(self, target: ProxyMappingItem) -> None:
@@ -137,19 +143,18 @@ and then again waits for the host to become reachable.
             return rtt
 
         timeout_s = int(self.target.options.get("timeout_s"))
-        host = str(urlparse(target_url).hostname)
+        target_url_str = str(target_url)
+        host = str(urlparse(target_url_str).hostname)
         logger.debug(f"Pinging '{host}' with timeout {timeout_s}s")
         first_ping = ping3.ping(host, unit="ms", timeout=timeout_s)
-        if first_ping:
-            logger.info(f"'{host}' ping successful in {first_ping}ms")
-        else:
-            logger.info(f"Sending magic packet to {self.target.options['mac']}")
-            send_magic_packet(self.target.options["mac"])
-            logger.info(f"Waiting for '{host}' to come alive timeout={timeout_s}s")
-            last_ping = await ping_until(timeout_s)
-            logger.info(f"Host '{host}' woke up, rtt={last_ping}")
 
-        return await super()._handler(request, target_url, path_in)
+        logger.info(f"Sending magic packet to {self.target.options['mac']}")
+        send_magic_packet(self.target.options["mac"])
+        logger.info(f"Waiting for '{host}' to come alive timeout={timeout_s}s")
+        last_ping = await ping_until(timeout_s)
+        logger.info(f"Host '{host}' woke up, rtt={last_ping}")
+
+        return await super()._handler(request, target_url_str, path_in)
 
 
 def generate_main_route_handler_with_options(handlers: list[BaseHandler]):
