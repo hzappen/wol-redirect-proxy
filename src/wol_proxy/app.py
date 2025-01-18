@@ -16,6 +16,7 @@ from pydantic import BaseModel, validator, AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response, JSONResponse
 from wakeonlan import send_magic_packet
+import httpx
 
 
 FORMAT = "%(asctime)s %(levelname)s: %(message)s"
@@ -23,6 +24,8 @@ logging.basicConfig(
     level="NOTSET", format=FORMAT, datefmt="[%X]"
 )
 logger = logging.getLogger("wol")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 class WolProxyError(Exception):
@@ -100,30 +103,72 @@ class BaseHandler:
 @Handlers.register("plain")
 class PlainRedirect(BaseHandler):
     summary = "PLAIN REDIRECT"
-    description = "A simple redirect."
+    description = "A simple transparent proxy."
 
     def __init__(self, target: ProxyMappingItem) -> None:
         super().__init__(target)
         self.description = f"{self.description}"
 
     async def _handler(self, request: Request, target_url: str, path_in=None):
-        # Convert AnyHttpUrl to string
+        import httpx
+
         target_url_str = str(target_url)
-        redirect_target = target_url_str
         if path_in:
-            # Use urljoin instead of os.path.join for URLs
             if not target_url_str.endswith('/'):
                 target_url_str += '/'
-            redirect_target = target_url_str + path_in
+            target_url_str = target_url_str + path_in
 
-        logger.info(f"Redirecting {request.method} to '{redirect_target}'")
-        return RedirectResponse(redirect_target)
+        # Get all headers from the original request
+        headers = dict(request.headers)
+        # Remove headers that might cause issues
+        headers.pop('host', None)
+        headers.pop('connection', None)
+        
+        # Set keep-alive headers
+        headers['Connection'] = 'keep-alive'
+        headers['Keep-Alive'] = 'timeout=5, max=1000'
+
+        # Get the request body if present
+        body = await request.body()
+
+        # Create an httpx client for making the request
+        transport = httpx.AsyncHTTPTransport(retries=1)
+        async with httpx.AsyncClient(
+            verify=False,
+            transport=transport,
+            timeout=30.0,
+            follow_redirects=True
+        ) as client:
+            try:
+                response = await client.request(
+                    method=request.method,
+                    url=target_url_str,
+                    headers=headers,
+                    content=body
+                )
+
+                # Create response with the same status code, headers, and content
+                response_headers = dict(response.headers)
+                # Ensure proper connection handling
+                response_headers['Connection'] = 'keep-alive'
+                
+                return Response(
+                    content=response.content,
+                    status_code=response.status_code,
+                    headers=response_headers
+                )
+            except httpx.RequestError as e:
+                logger.error(f"Error proxying request: {e}")
+                return Response(
+                    content=f"Error proxying request: {str(e)}",
+                    status_code=502
+                )
 
 
 @Handlers.register("wol")
 class WolRedirect(PlainRedirect):
     summary = "Wake-on-LAN"
-    description = """A simple WoL redirect. It tries to ping the target url before redirecting.
+    description = """A transparent proxy with Wake-on-LAN support. It tries to ping the target url before forwarding.
     If it's not responding, it sends a magic packet to the target machine 
     and then again waits for the host to become reachable.
     """
@@ -147,15 +192,16 @@ class WolRedirect(PlainRedirect):
         host = str(urlparse(target_url_str).hostname)
         logger.debug(f"Pinging '{host}' with timeout {timeout_s}s")
         first_ping = ping3.ping(host, unit="ms", timeout=timeout_s)
-
-        logger.info(f"Sending magic packet to {self.target.options['mac']}")
-        send_magic_packet(self.target.options["mac"])
-        logger.info(f"Waiting for '{host}' to come alive timeout={timeout_s}s")
-        last_ping = await ping_until(timeout_s)
-        logger.info(f"Host '{host}' woke up, rtt={last_ping}")
+        if first_ping:
+            logger.info(f"'{host}' ping successful in {first_ping}ms")
+        else:
+            logger.info(f"Sending magic packet to {self.target.options['mac']}")
+            send_magic_packet(self.target.options["mac"])
+            logger.info(f"Waiting for '{host}' to come alive timeout={timeout_s}s")
+            last_ping = await ping_until(timeout_s)
+            logger.info(f"Host '{host}' woke up, rtt={last_ping}")
 
         return await super()._handler(request, target_url_str, path_in)
-
 
 def generate_main_route_handler_with_options(handlers: list[BaseHandler]):
     """Merge handlers that share common path in a common handler function."""
