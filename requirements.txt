@@ -6,3 +6,4 @@ pyyaml
 uvicorn
 ping3
 httpx
+websockets

@@ -110,6 +110,11 @@ class PlainRedirect(BaseHandler):
         self.description = f"{self.description}"
 
     async def _handler(self, request: Request, target_url: str, path_in=None):
+        import httpx
+        from starlette.websockets import WebSocket
+        from websockets.client import connect as ws_connect
+        import json
+        import asyncio
 
         target_url_str = str(target_url)
         if path_in:
@@ -117,20 +122,59 @@ class PlainRedirect(BaseHandler):
                 target_url_str += '/'
             target_url_str = target_url_str + path_in
 
-        # Get all headers from the original request
+        # Handle WebSocket connections
+        if "websocket" in request.headers.get("Upgrade", "").lower():
+            ws_target_url = target_url_str.replace("http://", "ws://").replace("https://", "wss://")
+            websocket = WebSocket(request.scope, request.receive)
+            await websocket.accept()
+            
+            try:
+                async with ws_connect(ws_target_url) as ws_client:
+                    # Create tasks for bidirectional communication
+                    async def forward_to_target():
+                        try:
+                            while True:
+                                data = await websocket.receive_text()
+                                await ws_client.send(data)
+                        except Exception as e:
+                            logger.error(f"Error forwarding to target: {e}")
+
+                    async def forward_to_client():
+                        try:
+                            while True:
+                                data = await ws_client.recv()
+                                await websocket.send_text(data)
+                        except Exception as e:
+                            logger.error(f"Error forwarding to client: {e}")
+
+                    # Run both forward operations concurrently
+                    forward_tasks = asyncio.gather(
+                        forward_to_target(),
+                        forward_to_client()
+                    )
+                    
+                    try:
+                        await forward_tasks
+                    except Exception as e:
+                        logger.error(f"WebSocket forwarding error: {e}")
+                    finally:
+                        forward_tasks.cancel()
+                        
+            except Exception as e:
+                logger.error(f"WebSocket connection error: {e}")
+                await websocket.close()
+            return
+
+        # Regular HTTP handling
         headers = dict(request.headers)
-        # Remove headers that might cause issues
         headers.pop('host', None)
         headers.pop('connection', None)
         
-        # Set keep-alive headers
         headers['Connection'] = 'keep-alive'
         headers['Keep-Alive'] = 'timeout=5, max=1000'
 
-        # Get the request body if present
         body = await request.body()
 
-        # Create an httpx client for making the request
         transport = httpx.AsyncHTTPTransport(retries=1)
         async with httpx.AsyncClient(
             verify=False,
@@ -146,9 +190,7 @@ class PlainRedirect(BaseHandler):
                     content=body
                 )
 
-                # Create response with the same status code, headers, and content
                 response_headers = dict(response.headers)
-                # Ensure proper connection handling
                 response_headers['Connection'] = 'keep-alive'
                 
                 return Response(
@@ -162,7 +204,6 @@ class PlainRedirect(BaseHandler):
                     content=f"Error proxying request: {str(e)}",
                     status_code=502
                 )
-
 
 @Handlers.register("wol")
 class WolRedirect(PlainRedirect):
