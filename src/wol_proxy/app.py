@@ -227,6 +227,11 @@ class PlainRedirect(BaseHandler):
             'connection' in request.headers and 'upgrade' in request.headers.get('connection', '').lower()
         ])
         
+        # Special case for Ollama API endpoints - they might be streaming but need proper JSON handling
+        if '/api/chat' in target_url_str or '/api/generate' in target_url_str:
+            logger.debug(f"Detected API endpoint that might be streaming: {target_url_str}")
+            is_streaming = True
+        
         transport = httpx.AsyncHTTPTransport(retries=1)
         
         # Handle streaming responses
@@ -234,6 +239,8 @@ class PlainRedirect(BaseHandler):
             logger.debug("Handling streaming response")
             
             async def stream_response():
+                nonlocal response_headers  # Allow updating headers from inside the generator
+                
                 async with httpx.AsyncClient(
                     verify=False,
                     transport=transport,
@@ -248,6 +255,17 @@ class PlainRedirect(BaseHandler):
                             headers=headers,
                             content=body
                         ) as response:
+                            # Update response headers with actual headers from the response
+                            for key, value in response.headers.items():
+                                # Skip content-length as it might be incorrect for streaming
+                                if key.lower() != 'content-length':
+                                    # For API endpoints, preserve application/json content type
+                                    if key.lower() == 'content-type' and '/api/' in target_url_str and 'json' in response_headers.get('Content-Type', ''):
+                                        # Keep our JSON content type
+                                        pass
+                                    else:
+                                        response_headers[key] = value
+                            
                             logger.debug(f"Got streaming response with status {response.status_code}")
                             
                             # For JSON streaming formats, we need to handle line-by-line
@@ -292,55 +310,43 @@ class PlainRedirect(BaseHandler):
                     except httpx.RequestError as e:
                         logger.error(f"Error in streaming request: {e}")
                         yield f"Error proxying streaming request: {str(e)}".encode()
+                    except Exception as e:
+                        logger.error(f"Unexpected error in streaming: {e}")
+                        yield f"Unexpected error in streaming: {str(e)}".encode()
             
-            # Get response headers first to set up the streaming response
-            async with httpx.AsyncClient(
-                verify=False,
-                transport=transport,
-                timeout=30.0,
-                follow_redirects=True
-            ) as client:
-                try:
-                    # Make a HEAD request to get headers
-                    head_response = await client.request(
-                        method="HEAD",
-                        url=target_url_str,
-                        headers=headers
-                    )
-                    
-                    response_headers = dict(head_response.headers)
-                    # Ensure proper streaming headers
-                    response_headers['Connection'] = 'keep-alive'
-                    response_headers['Cache-Control'] = 'no-cache'
-                    response_headers['X-Accel-Buffering'] = 'no'  # Disable proxy buffering
-                    
-                    # If content type wasn't in the HEAD response, try to guess it
-                    if 'Content-Type' not in response_headers:
-                        if 'text/event-stream' in request.headers.get('accept', '').lower():
-                            response_headers['Content-Type'] = 'text/event-stream'
-                        elif 'application/x-ndjson' in request.headers.get('accept', '').lower():
-                            response_headers['Content-Type'] = 'application/x-ndjson'
-                        elif 'application/stream+json' in request.headers.get('accept', '').lower():
-                            response_headers['Content-Type'] = 'application/stream+json'
-                        elif 'application/json-seq' in request.headers.get('accept', '').lower():
-                            response_headers['Content-Type'] = 'application/json-seq'
-                        elif 'application/json' in request.headers.get('accept', '').lower():
-                            # If JSON is requested, but we're streaming, use ndjson format
-                            response_headers['Content-Type'] = 'application/x-ndjson'
-                        else:
-                            response_headers['Content-Type'] = 'application/octet-stream'
-                    
-                    return StreamingResponse(
-                        stream_response(),
-                        status_code=head_response.status_code,
-                        headers=response_headers
-                    )
-                except httpx.RequestError as e:
-                    logger.error(f"Error getting headers for streaming: {e}")
-                    return Response(
-                        content=f"Error setting up streaming: {str(e)}",
-                        status_code=502
-                    )
+            # Set up default headers for streaming response
+            response_headers = {
+                'Connection': 'keep-alive',
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no'  # Disable proxy buffering
+            }
+            
+            # Determine content type based on request headers
+            if 'text/event-stream' in request.headers.get('accept', '').lower():
+                response_headers['Content-Type'] = 'text/event-stream'
+            elif 'application/x-ndjson' in request.headers.get('accept', '').lower():
+                response_headers['Content-Type'] = 'application/x-ndjson'
+            elif 'application/stream+json' in request.headers.get('accept', '').lower():
+                response_headers['Content-Type'] = 'application/stream+json'
+            elif 'application/json-seq' in request.headers.get('accept', '').lower():
+                response_headers['Content-Type'] = 'application/json-seq'
+            elif 'application/json' in request.headers.get('accept', '').lower():
+                # If JSON is requested, use application/json even for streaming
+                response_headers['Content-Type'] = 'application/json'
+            else:
+                # Default to JSON for API endpoints
+                if '/api/' in target_url_str:
+                    response_headers['Content-Type'] = 'application/json'
+                else:
+                    response_headers['Content-Type'] = 'application/octet-stream'
+            
+            # Skip the HEAD request which can cause issues with some servers
+            # and just start streaming directly
+            return StreamingResponse(
+                stream_response(),
+                status_code=200,  # We'll use the actual status from the stream
+                headers=response_headers
+            )
         
         # Regular non-streaming response
         async with httpx.AsyncClient(
