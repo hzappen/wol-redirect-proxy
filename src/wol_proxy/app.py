@@ -216,7 +216,15 @@ class PlainRedirect(BaseHandler):
         is_streaming = any([
             'text/event-stream' in request.headers.get('accept', '').lower(),
             'text/event-stream' in request.headers.get('content-type', '').lower(),
-            'chunked' in request.headers.get('transfer-encoding', '').lower()
+            'application/x-ndjson' in request.headers.get('accept', '').lower(),
+            'application/x-ndjson' in request.headers.get('content-type', '').lower(),
+            'application/stream+json' in request.headers.get('accept', '').lower(),
+            'application/stream+json' in request.headers.get('content-type', '').lower(),
+            'application/json-seq' in request.headers.get('accept', '').lower(),
+            'application/json-seq' in request.headers.get('content-type', '').lower(),
+            'chunked' in request.headers.get('transfer-encoding', '').lower(),
+            request.headers.get('accept') == '*/*',  # Many streaming clients use this
+            'connection' in request.headers and 'upgrade' in request.headers.get('connection', '').lower()
         ])
         
         transport = httpx.AsyncHTTPTransport(retries=1)
@@ -229,31 +237,110 @@ class PlainRedirect(BaseHandler):
                 async with httpx.AsyncClient(
                     verify=False,
                     transport=transport,
-                    timeout=60.0,
+                    timeout=120.0,  # Longer timeout for streaming
                     follow_redirects=True
                 ) as client:
                     try:
+                        logger.debug(f"Streaming request to {target_url_str}")
                         async with client.stream(
                             method=request.method,
                             url=target_url_str,
                             headers=headers,
                             content=body
                         ) as response:
-                            response_headers = dict(response.headers)
-                            response_headers['Connection'] = 'keep-alive'
+                            logger.debug(f"Got streaming response with status {response.status_code}")
                             
-                            yield response.status_code
-                            yield response_headers
+                            # For JSON streaming formats, we need to handle line-by-line
+                            content_type = response.headers.get('content-type', '').lower()
+                            is_json_stream = any([
+                                'application/x-ndjson' in content_type,
+                                'application/stream+json' in content_type,
+                                'application/json-seq' in content_type,
+                                # Some servers don't set the right content type for JSON streams
+                                'application/json' in content_type and 'chunked' in response.headers.get('transfer-encoding', '').lower()
+                            ])
                             
-                            async for chunk in response.aiter_bytes():
-                                yield chunk
+                            if is_json_stream:
+                                logger.debug("Handling JSON streaming response")
+                                buffer = b""
+                                async for chunk in response.aiter_bytes():
+                                    if not chunk:
+                                        continue
+                                        
+                                    buffer += chunk
+                                    lines = buffer.split(b'\n')
+                                    
+                                    # Process all complete lines
+                                    for line in lines[:-1]:
+                                        if line.strip():  # Skip empty lines
+                                            logger.debug(f"Streaming JSON line: {len(line)} bytes")
+                                            yield line + b'\n'
+                                    
+                                    # Keep the last (potentially incomplete) line in the buffer
+                                    buffer = lines[-1]
+                                
+                                # Don't forget the last line if there's no trailing newline
+                                if buffer.strip():
+                                    logger.debug(f"Streaming final JSON line: {len(buffer)} bytes")
+                                    yield buffer
+                            else:
+                                # Regular streaming
+                                async for chunk in response.aiter_bytes():
+                                    if chunk:  # Only yield non-empty chunks
+                                        logger.debug(f"Streaming chunk of size {len(chunk)}")
+                                        yield chunk
                     except httpx.RequestError as e:
                         logger.error(f"Error in streaming request: {e}")
-                        yield 502
-                        yield {"Content-Type": "text/plain"}
                         yield f"Error proxying streaming request: {str(e)}".encode()
             
-            return StreamingResponse(stream_response())
+            # Get response headers first to set up the streaming response
+            async with httpx.AsyncClient(
+                verify=False,
+                transport=transport,
+                timeout=30.0,
+                follow_redirects=True
+            ) as client:
+                try:
+                    # Make a HEAD request to get headers
+                    head_response = await client.request(
+                        method="HEAD",
+                        url=target_url_str,
+                        headers=headers
+                    )
+                    
+                    response_headers = dict(head_response.headers)
+                    # Ensure proper streaming headers
+                    response_headers['Connection'] = 'keep-alive'
+                    response_headers['Cache-Control'] = 'no-cache'
+                    response_headers['X-Accel-Buffering'] = 'no'  # Disable proxy buffering
+                    
+                    # If content type wasn't in the HEAD response, try to guess it
+                    if 'Content-Type' not in response_headers:
+                        if 'text/event-stream' in request.headers.get('accept', '').lower():
+                            response_headers['Content-Type'] = 'text/event-stream'
+                        elif 'application/x-ndjson' in request.headers.get('accept', '').lower():
+                            response_headers['Content-Type'] = 'application/x-ndjson'
+                        elif 'application/stream+json' in request.headers.get('accept', '').lower():
+                            response_headers['Content-Type'] = 'application/stream+json'
+                        elif 'application/json-seq' in request.headers.get('accept', '').lower():
+                            response_headers['Content-Type'] = 'application/json-seq'
+                        elif 'application/json' in request.headers.get('accept', '').lower():
+                            # If JSON is requested, but we're streaming, use ndjson format
+                            response_headers['Content-Type'] = 'application/x-ndjson'
+                        else:
+                            response_headers['Content-Type'] = 'application/octet-stream'
+                    
+                    return StreamingResponse(
+                        stream_response(),
+                        status_code=head_response.status_code,
+                        headers=response_headers
+                    )
+                except httpx.RequestError as e:
+                    logger.error(f"Error getting headers for streaming: {e}")
+                    return Response(
+                        content=f"Error setting up streaming: {str(e)}",
+                        status_code=502
+                    )
         
         # Regular non-streaming response
         async with httpx.AsyncClient(
