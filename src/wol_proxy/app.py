@@ -128,24 +128,53 @@ class PlainRedirect(BaseHandler):
             websocket = WebSocket(request.scope, request.receive)
             await websocket.accept()
             
+            client_closed = False
+            server_closed = False
+            
             try:
                 async with ws_connect(ws_target_url) as ws_client:
                     # Create tasks for bidirectional communication
                     async def forward_to_target():
+                        nonlocal client_closed
                         try:
-                            while True:
-                                data = await websocket.receive_text()
-                                await ws_client.send(data)
+                            while not client_closed:
+                                try:
+                                    message = await websocket.receive()
+                                    if message["type"] == "websocket.disconnect":
+                                        logger.debug("Client disconnected")
+                                        client_closed = True
+                                        break
+                                    
+                                    if message["type"] == "websocket.receive":
+                                        if "text" in message:
+                                            await ws_client.send(message["text"])
+                                        elif "bytes" in message:
+                                            await ws_client.send(message["bytes"])
+                                except Exception as e:
+                                    logger.error(f"Error receiving from client: {e}")
+                                    client_closed = True
+                                    break
                         except Exception as e:
-                            logger.error(f"Error forwarding to target: {e}")
+                            logger.error(f"Error in forward_to_target: {e}")
+                            client_closed = True
 
                     async def forward_to_client():
+                        nonlocal server_closed
                         try:
-                            while True:
-                                data = await ws_client.recv()
-                                await websocket.send_text(data)
+                            while not server_closed and not client_closed:
+                                try:
+                                    data = await ws_client.recv()
+                                    if isinstance(data, str):
+                                        await websocket.send_text(data)
+                                    elif isinstance(data, bytes):
+                                        await websocket.send_bytes(data)
+                                except Exception as e:
+                                    logger.error(f"Error receiving from server: {e}")
+                                    server_closed = True
+                                    break
                         except Exception as e:
-                            logger.error(f"Error forwarding to client: {e}")
+                            logger.error(f"Error in forward_to_client: {e}")
+                            server_closed = True
 
                     # Run both forward operations concurrently
                     forward_tasks = asyncio.gather(
@@ -155,14 +184,22 @@ class PlainRedirect(BaseHandler):
                     
                     try:
                         await forward_tasks
+                    except asyncio.CancelledError:
+                        logger.debug("WebSocket tasks cancelled")
                     except Exception as e:
                         logger.error(f"WebSocket forwarding error: {e}")
                     finally:
-                        forward_tasks.cancel()
+                        if not forward_tasks.done():
+                            forward_tasks.cancel()
                         
             except Exception as e:
                 logger.error(f"WebSocket connection error: {e}")
-                await websocket.close()
+            finally:
+                try:
+                    if not client_closed:
+                        await websocket.close()
+                except Exception as e:
+                    logger.error(f"Error closing client websocket: {e}")
             return
 
         # Regular HTTP handling
