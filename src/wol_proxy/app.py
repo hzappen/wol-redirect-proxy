@@ -14,7 +14,7 @@ import yaml
 from fastapi import FastAPI
 from pydantic import BaseModel, validator, AnyHttpUrl
 from starlette.requests import Request
-from starlette.responses import Response, JSONResponse
+from starlette.responses import Response, JSONResponse, StreamingResponse
 from wakeonlan import send_magic_packet
 import httpx
 
@@ -212,7 +212,50 @@ class PlainRedirect(BaseHandler):
 
         body = await request.body()
 
+        # Check if this might be a streaming request/response
+        is_streaming = any([
+            'text/event-stream' in request.headers.get('accept', '').lower(),
+            'text/event-stream' in request.headers.get('content-type', '').lower(),
+            'chunked' in request.headers.get('transfer-encoding', '').lower()
+        ])
+        
         transport = httpx.AsyncHTTPTransport(retries=1)
+        
+        # Handle streaming responses
+        if is_streaming:
+            logger.debug("Handling streaming response")
+            
+            async def stream_response():
+                async with httpx.AsyncClient(
+                    verify=False,
+                    transport=transport,
+                    timeout=60.0,
+                    follow_redirects=True
+                ) as client:
+                    try:
+                        async with client.stream(
+                            method=request.method,
+                            url=target_url_str,
+                            headers=headers,
+                            content=body
+                        ) as response:
+                            response_headers = dict(response.headers)
+                            response_headers['Connection'] = 'keep-alive'
+                            
+                            yield response.status_code
+                            yield response_headers
+                            
+                            async for chunk in response.aiter_bytes():
+                                yield chunk
+                    except httpx.RequestError as e:
+                        logger.error(f"Error in streaming request: {e}")
+                        yield 502
+                        yield {"Content-Type": "text/plain"}
+                        yield f"Error proxying streaming request: {str(e)}".encode()
+            
+            return StreamingResponse(stream_response())
+        
+        # Regular non-streaming response
         async with httpx.AsyncClient(
             verify=False,
             transport=transport,
