@@ -1,17 +1,23 @@
 ---
 targets:
 - handler: "wol"
-  source_url: "http://foo.bar.baz/*"
-  target_url: "http://my-server-1.home:9090"
+  source_url: "http://ollamaproxy.xyz.net:11434/*"
+  target_url: "http://aiserv.xyz.net:11434"
   methods: [GET, POST, DELETE, PATCH]
   options:
-    mac: "00:1e:a5:1a:9d:11"
-    timeout_s: 1
-
-- handler: "plain"
-  source_url: "http://another.hostname/with/a/specific/path"
-  target_url: "https://google.com"
-  methods: [GET]
+    mac: "a8:a1:59:08:b2:23"
+    timeout_s: "30"
+- handler: "wol"
+  source_url: "http://ollamaproxy.xyz.net:8880/*"
+  target_url: "http://aiserv.xyz.net:8880"
+  methods: [GET, POST, DELETE, PATCH]
   options:
-    mac: "00:1e:a5:1a:9d:11"
-    timeout_s: 2
+    mac: "a8:a1:59:08:b2:23"
+    timeout_s: "30"
+- handler: "wol"
+  source_url: "http://llamaproxy.xyz.net:9292/*"
+  target_url: "http://aiserv.xyz.net:9292"
+  methods: [GET, POST, DELETE, PATCH]
+  options:
+    mac: "a8:a1:59:08:b2:23"
+    timeout_s: "30"

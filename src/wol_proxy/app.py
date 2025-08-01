@@ -501,7 +501,6 @@ def get_error_handler(exception_type: type[WolProxyError]):
 def main():
     parser = argparse.ArgumentParser(description="Start a simple WoL redirect proxy server.")
     parser.add_argument("--host", default="0.0.0.0", help="accept connections only to this address")
-    parser.add_argument("--port", type=int, default=8080, help="start server listening on this port")
     parser.add_argument("--log-level", type=str, default="INFO", help="logging level (default=INFO)")
     parser.add_argument("-c", metavar="CONFIG", dest="configuration", type=str, required=False, help="non-default configuration location")
     parser.add_argument("--list", action="store_true", help="list available handler types")
@@ -530,17 +529,40 @@ def main():
     █   █      ▀█▄▄█▀ ▄██▄       ▄██▄     ▄██▄     ▀█▄▄█▀ ▄█  ██▄     ▀█    
                                                                    ▄▄ █     
                                                                     ▀▀
-See http://{args.host}:{args.port}/docs to see the configured routes.
+See http://{args.host} (multiple ports) /docs to see the configured routes.
 ----------------------------------------------------------------------------
     """)
     configuration = read_configuration(args.configuration)
 
+    logger.info("Registered handlers:")
+    for target in configuration.targets:
+        logger.info(f"Handler: {target.handler}, Source: {target.source_url}, Target: {target.target_url}")
     app = create_app(configuration)
     app.add_exception_handler(WolProxyError, get_error_handler(WolProxyError))
     app.add_exception_handler(HostUnreachableError, get_error_handler(HostUnreachableError))
     app.add_exception_handler(NoHandlerError, get_error_handler(NoHandlerError))
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    # Collect ports from configuration
+    ports = set()
+    for target in configuration.targets:
+        url = urlparse(str(target.source_url))
+        port = url.port or (443 if url.scheme == 'https' else 80)
+        ports.add(port)
+
+    async def run_servers():
+        servers = []
+        for port in ports:
+            config = uvicorn.Config(
+                app,
+                host=args.host,
+                port=port,
+                log_level=args.log_level.lower()
+            )
+            servers.append(uvicorn.Server(config).serve())
+        await asyncio.gather(*servers)
+
+    logger.info(f"Starting servers on ports: {', '.join(map(str, ports))}")
+    asyncio.run(run_servers())
 
 
 if __name__ == '__main__':
