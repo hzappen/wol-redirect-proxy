@@ -419,7 +419,7 @@ def generate_main_route_handler_with_options(handlers: list[BaseHandler]):
         hostname = request.base_url.hostname
         logger.info(f"Incoming request {hostname!r} with path: {path_in!r}")
         for h in handlers:
-            if h.target.source_url.host == hostname:
+            if h.target.source_url.host == hostname and h.target.source_url.port == request.base_url.port:
                 logger.info(f"Matched handler: {h.target.source_url} -> {h.target.target_url}")
                 return await h.route_handler(request, path_in)
 
